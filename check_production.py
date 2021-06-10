@@ -2,6 +2,7 @@ import sys
 import argparse
 import subprocess
 import urllib
+import pprint
 
 import ROOT
 import pymongo
@@ -20,21 +21,42 @@ def PlotDuration():
     tasks = [x['_id'] for x in query]
     print tasks
 
-    histos = []
+    global histos
+    histos = {}
     for task in tasks:
-        histos.append( ROOT.TH1D("hist_{}".format(task), ";t;Jobs", 500, 0, 12))
+        print 80*'='
+        PlotTask(task)
+        print 80*'='
+    return histos
+
+def PlotTask(task):
+    pipeline = [
+    { u'$match' : {u'task' : task} },
+    { u'$group' : {u'_id' : u'$subtask'} }
+    ]
+    print pipeline
+
+    query = list(db.jobs.aggregate(pipeline))
+    print 80*'-'
+
+    temphistos = {}
+
+    subtasks = [x['_id'] for x in query]
+    for subtask in subtasks:
+        temphistos[subtask] = ROOT.TH1D("hist_{}_{}".format(task.replace('/', '_'), subtask.replace('/', '_')), ";t;Jobs", 400, 0, 36)
         query = list(db.jobs.find({
         u'task' : task,
+        u'subtask' : subtask,
         u'status' : u'Done'
         }))
-        print "Queried {} jobs for task {}".format(len(query), task)
+        print "Queried {} jobs for task {} - {}".format(len(query), task, subtask)
         for job in query:
             try:
-                histos[-1].Fill((job['finishTime']-job['startTime']).total_seconds()/float(3600))
+                temphistos[subtask].Fill((job['finishTime']-job['startTime']).total_seconds()/float(3600))
             except KeyError:
                 continue
 
-    return histos
+    histos[task] = temphistos
 
 
 
@@ -44,6 +66,7 @@ def main():
     parser.add_argument('-U' , '--dbuser'     , type=str, nargs=1  , help='MongoDB user. Mandatory')
     parser.add_argument('-P' , '--dbpass'     , type=str, nargs=1  , help='MongoDB password. Mandatory')
     parser.add_argument('-D' , '--db'         , type=str, nargs=1  , help='MongoDB db name. Mandatory')
+    parser.add_argument('-t' , '--task'       , type=str, nargs=1  , help='Task name.')
     args = parser.parse_args()
 
     if not args.dbuser:
@@ -77,12 +100,26 @@ def main():
 
     print db
 
+    global task
+    if args.task:
+        task = args.task
+
     timehistos = PlotDuration()
-    print timehistos
+    pprint.pprint( timehistos )
 
     outfile = ROOT.TFile("prod_plots.root", "recreate")
-    for histo in timehistos:
-        outfile.WriteTObject(histo)
+    for task, histos in timehistos.iteritems():
+        outfile.cd()
+        task = task.replace('/','_')
+        tdir = ROOT.TDirectoryFile(task, task)
+        tdir.cd()
+        for subtask, histo in histos.iteritems():
+            subtask = subtask.replace('/','_')
+            # print task, subtask, histo.GetSumOfWeights()
+            histo.SetName(subtask)
+            histo.Write()
+        tdir.ls()
+        tdir.Write()
     outfile.Close()
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ import subprocess, re
 
 import dbmgr
 
+
+def kill_proc(proc):
+    logging.warning("Timeout reached, attempting to kill process...")
+    proc.kill()
+
 #----------------------------------------------------------------#
 # Class to manage a LSF Job
 #----------------------------------------------------------------#
@@ -30,7 +35,6 @@ class LSFJob:
         self.queue = ""
         self.poutfile = ""
         self.perrfile = ""
-        self.flags = ""
         self.script = ""
         self.lsfID = 0      #internal variable, will be used to check job status
         self.retries = 0
@@ -44,16 +48,25 @@ class LSFJob:
         self.passwd = dbmgr.MongoDBManager().pwd
         self.cmd = ""
         self.queued = False
+        self.test = False
 
     def SetName( self ):
-        self.jobName += str(self.i) + "/" + str(self.totfiles) + "-" + os.path.basename(self.exe) + "-"
-        self.jobName += self.task + "-" + self.flags + "-"
-        self.jobName += os.path.basename(self.infile.strip())
-        self.hash    = hashlib.sha1(self.jobName).hexdigest()
+        # self.jobName += str(self.i) + "/" + str(self.totfiles) + "-" + os.path.basename(self.exe) + "-"
+        self.jobName  = os.path.basename(self.exe) + "-"
+        self.jobName += self.task.name + "-" + self.subtask + "-"
+        self.jobName += os.path.basename(self.outfile.strip())
+
+        self.hash     = os.path.basename(self.exe) + "-"
+        self.hash    += self.arguments + "-"
+        self.hash    += self.task.name + "-" + self.subtask + "-"
+        self.hash    += os.path.basename(self.outfile.strip())
+        self.hash     = hashlib.sha1(self.hash).hexdigest()
 
     def FillVars( self ):
-        self.perrfile = self.workdir+"/perr/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
-        self.poutfile = self.workdir+"/pout/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
+        # self.perrfile = self.workdir+"/perr/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
+        # self.poutfile = self.workdir+"/pout/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
+        self.perrfile = "/dev/null"
+        self.poutfile = "/dev/null"
 
     def GetCMD( self ):
         stdinstring  = self.amsvar
@@ -108,8 +121,12 @@ class LSFJob:
 
     def Submit( self ):
         self.GetCMD()
+        if self.test:
+            print self.cmd
+            return
+        
         proc = subprocess.Popen([self.cmd,''], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kill_proc = lambda p: p.kill()
+        # kill_proc = lambda p: p.kill()
         timer = threading.Timer(60, kill_proc, [proc])
         try:
             timer.start()
@@ -147,7 +164,6 @@ class LSFJob:
         print "queue      = ", self.queue
         print "poutfile   = ", self.poutfile
         print "perrfile   = ", self.perrfile
-        print "flags      = ", self.flags
         print "script  = ", self.script
         print "retries    = ", self.retries
         print "server     = ", self.server

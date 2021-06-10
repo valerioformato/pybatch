@@ -7,31 +7,43 @@ import subprocess, re
 
 import dbmgr
 
-#----------------------------------------------------------------#
-# Class to manage a LSF Job
-#----------------------------------------------------------------#
-class HTCondorJob:
+CondorTemplate = """workdir = {}
+ioname = {}
 
-# arguments               @=arg
-# {}
-# @arg
-
-    CondorTemplate = """executable              = {}
-input                   = {}
-output                  = {}
-error                   = {}
-log                     = {}
+executable              = {}
+input                   = $(workdir)/pin/$(ioname).txt
+output                  = /dev/null
+error                   = /dev/null
+log                     = /dev/null
 batch_name              = {}
 
 should_transfer_files	= YES
 transfer_input_files    = {}
 
+stream_error            = False
+stream_output           = False
+
 universe                = vanilla
-+MaxRuntime             = 14000
-#+JobFlavour            = "workday"
++MaxRuntime             = 86400
 RequestCpus             = 1
+request_disk            = 2GB
+
+periodic_hold           = ((JobStatus==2) && (CurrentTime - EnteredCurrentStatus) > 2700 && (RemoteSysCpu + RemoteUserCpu) > 600 && (RemoteSysCpu + RemoteUserCpu)/(CurrentTime - EnteredCurrentStatus) < 0.02)
+periodic_release        = (CurrentTime - EnteredCurrentStatus) > 300
+
+environment             = "STDINFILENAME=$(workdir)/pin/$(ioname).txt"
+
+requirements            = (OpSysAndVer =?= "CentOS7")
++AMSPublic              = true
+
+{}
 
 queue 1"""
+
+#----------------------------------------------------------------#
+# Class to manage a LSF Job
+#----------------------------------------------------------------#
+class HTCondorJob:
 
     def __init__( self, i, subtask ):
         self.useCWD = True
@@ -40,6 +52,7 @@ queue 1"""
         self.jobName = ""
         self.hash = ""
         self.amsvar = ""
+        self.keytab = None
         self.exe = ""
         self.workdir = ""
         self.arguments = ""
@@ -50,10 +63,7 @@ queue 1"""
         self.task = subtask.task
         self.subtask = subtask.name
         self.queue = ""     #not needed?
-        self.pinfile = ""
-        self.poutfile = ""
-        self.perrfile = ""
-        self.flags = ""
+        self.ioname = ""
         self.script = ""
         self.condorID = 0      #internal variable, will be used to check job status
         self.retries = 0
@@ -68,14 +78,32 @@ queue 1"""
         self.condorfile = ""
         self.queued = False
         self.stdinstring = ""
+        self.test = False
+        self.userschedd = False
+        self.scheddname = None
+        self.scheddpool = None
+
+
+    def SetSchedd( self, scheddname, scheddpool = None):
+        self.userschedd = True
+        self.scheddname = scheddname
+        self.scheddpool = scheddpool
+        pass
 
     def SetName( self ):
-        self.jobName += str(self.i) + "/" + str(self.totfiles) + "-" + os.path.basename(self.exe) + "-"
-        self.jobName += self.task + "-" + self.flags + "-"
-        self.jobName += os.path.basename(self.infile.strip())
-        self.hash     = hashlib.sha1(self.jobName).hexdigest()
+        # self.jobName += str(self.i) + "/" + str(self.totfiles) + "-" + os.path.basename(self.exe) + "-"
+        self.jobName  = os.path.basename(self.exe) + "-"
+        self.jobName += self.task.name + "-" + self.subtask + "-"
+        self.jobName += os.path.basename(self.outfile.strip())
+
+        self.hash     = os.path.basename(self.exe) + "-"
+        self.hash    += self.arguments + "-"
+        self.hash    += self.task.name + "-" + self.subtask + "-"
+        self.hash    += os.path.basename(self.outfile.strip())
+        self.hash     = hashlib.sha1(self.hash).hexdigest()
 
     def FillVars( self ):
+        self.ioname   = os.path.basename(self.exe)+"_"+self.outfile[:-5]
         self.pinfile  = self.workdir+"/pin/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
         self.perrfile = self.workdir+"/perr/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
         self.poutfile = self.workdir+"/pout/"+os.path.basename(self.exe)+"_"+self.outfile[:-5]+".txt"
@@ -86,8 +114,6 @@ queue 1"""
         self.stdinstring += '\n'
 
         self.stdinstring += self.exe + " " + self.arguments
-        # if( len(masses) ):
-        #     self.stdinstring += " -a" + masses[ilist]
         self.stdinstring += '\n'
 
         self.stdinstring += self.indir
@@ -113,29 +139,18 @@ queue 1"""
 
         self.stdinstring += self.hash
 
-        self.cmd = "condor_submit {}/.tmp/{}.sub".format(self.workdir, self.hash)
-
-        # self.cmd  = "bsub -q " + self.queue
-        # if self.useCWD:
-        #     self.cmd += " -cwd " + self.workdir
-        # self.cmd += " -eo " + self.perrfile
-        # self.cmd += " -oo " + self.poutfile
-        # self.cmd += " -J \"" + self.jobName + "\""
-        # self.cmd += " \"" + self.script + " <<< " + "\\\"" + stdinstring + "\\\"\""
-
-        # return self.condorfile
-
-    def SwitchToQueue( self, queue ):
-        switchCmd = "bswitch " + str(queue) + " " + str(self.lsfID)
-        dummy = subprocess.Popen([switchCmd,''], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        dummyOut = dummy.stdout.read().strip()
-        dummyErr = dummy.stderr.read().strip()
-        if dummyErr != "":
-            logging.error( dummyErr )
-            pass
+        self.cmd =  "condor_submit "
+        if self.userschedd:
+            self.cmd += "-name {} ".format(self.scheddname)
+        if self.scheddpool:
+            self.cmd += "-pool {} ".format(self.scheddpool)
+        self.cmd += "-spool "
+        self.cmd += "{}/.tmp/{}.sub".format(self.workdir, self.hash)
 
     def Submit( self ):
         self.GetCMD()
+        if self.test:
+            print self.cmd
 
         with open(self.pinfile, "w") as pinfile:
             logging.debug("Writing stdin file...")
@@ -143,15 +158,17 @@ queue 1"""
             logging.debug("... done")
 
 
-        self.condorfile = self.CondorTemplate.format(
+        toBeTransf = "/bin/echo"
+        toBeTransf += ", {}".format(self.amsvar)
+        if self.keytab:
+            toBeTransf += ", {}".format(self.keytab)
+        self.condorfile = CondorTemplate.format(
+            self.workdir,
+            self.ioname,
             self.script,
-            # "\' <<< " + "\\\"" + stdinstring + "\\\"\'",
-            self.pinfile,
-            self.poutfile,
-            self.perrfile,
-            self.plogfile,
-            self.task,
-            self.amsvar
+            self.task.name,
+            toBeTransf,
+            "x509userproxy = {}".format(self.task.x509userproxy) if (self.task.x509userproxy != "") else ""
         )
 
         if not os.path.exists( self.workdir + ".tmp" ):
@@ -166,28 +183,31 @@ queue 1"""
             submitFile.write(self.condorfile)
             logging.debug("... done")
 
+        if self.test:
+            return
+
         proc = subprocess.Popen([self.cmd,''], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kill_proc = lambda p: p.kill()
-        timer = threading.Timer(60, kill_proc, [proc])
-        try:
-            timer.start()
-            dummyOut, dummyErr = proc.communicate()
-            logging.debug("condor_submit stdout: " + dummyOut.strip())
-            logging.debug("condor_submit stderr: " + dummyErr.strip())
-        finally:
-            timer.cancel()
+        dummyOut, dummyErr = proc.communicate()
+        logging.debug("condor_submit stdout: " + dummyOut.strip())
+        logging.debug("condor_submit stderr: " + dummyErr.strip())
 
         if dummyErr != "":
-            logging.error( dummyErr )
+            logging.error( dummyErr.strip() )
             pass
 
         try:
             self.condorID = int(re.search( ".*cluster\s(\d*)", dummyOut ).group(1))
         except AttributeError:
             logging.error( "condor_submit command probably failed. Please check for problems..." )
+            logging.error("condor_submit stdout: " + dummyOut.strip())
+            logging.error("condor_submit stderr: " + dummyErr.strip())
             return False
+        logging.debug("Retrieved condorID: {}".format(self.condorID))
         self.shortID = str(self.condorID)
-        os.remove(self.workdir + ".tmp/{}.sub".format(self.hash))
+        try:
+            os.remove(self.workdir + ".tmp/{}.sub".format(self.hash))
+        except OSError:
+            pass
         logging.debug("condor file removed")
 
         return True
@@ -206,9 +226,6 @@ queue 1"""
         print "infile     = ", self.infile
         print "outfile    = ", self.outfile
         print "queue      = ", self.queue
-        print "poutfile   = ", self.poutfile
-        print "perrfile   = ", self.perrfile
-        print "flags      = ", self.flags
         print "script     = ", self.script
         print "retries    = ", self.retries
         print "server     = ", self.server
